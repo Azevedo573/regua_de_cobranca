@@ -161,8 +161,8 @@ def enviar_whatsapp_simples(df, client, template_id, simular=False):
     def extrair_parametros(contato):
         return [
             contato['nome'],
-            contato['valor'],
-            contato['vencimento']
+            contato['operadora'],
+            contato['Data de Vencimento']
         ]
     
     # Envia lote
@@ -178,7 +178,7 @@ def enviar_whatsapp_simples(df, client, template_id, simular=False):
     return resultado
 
 def exibir_resultado_whatsapp_simples(resultado):
-    """Exibe resultado do envio WhatsApp"""
+    """Exibe resultado do envio WhatsApp com detalhes de WAMID"""
     if resultado is None:
         return
     
@@ -194,16 +194,39 @@ def exibir_resultado_whatsapp_simples(resultado):
     with col4:
         st.metric("📈 Taxa", resultado['taxa_sucesso'])
     
-    # Se teve falhas, mostra quem não recebeu
-    if resultado['erro'] > 0:
-        with st.expander("📋 Ver contatos com erro"):
-            falhados = [
-                f"{r['nome']} ({r['telefone']})"
-                for r in resultado['resultados'] 
-                if not r['sucesso']
-            ]
-            for nome_tel in falhados:
-                st.write(f"❌ {nome_tel}")
+    st.markdown("---")
+    
+    # Mostra detalhes de cada envio
+    st.subheader("📋 Detalhes do Envio")
+    
+    # Sucesso
+    sucessos = [r for r in resultado['resultados'] if r['sucesso']]
+    if sucessos:
+        with st.expander(f"✅ Enviadas ({len(sucessos)})"):
+            for r in sucessos:
+                col_nome, col_telefone, col_wamid = st.columns([2, 2, 3])
+                with col_nome:
+                    st.write(r['nome'])
+                with col_telefone:
+                    st.write(f"`{r['telefone']}`")
+                with col_wamid:
+                    if r['wamid'] and r['wamid'] != 'simulado':
+                        st.write(f"🔗 `{r['wamid'][:30]}...`")
+                    else:
+                        st.write("(Simulado)")
+    
+    # Falhas
+    falhas = [r for r in resultado['resultados'] if not r['sucesso']]
+    if falhas:
+        with st.expander(f"❌ Falhadas ({len(falhas)})"):
+            for r in falhas:
+                col_nome, col_telefone, col_erro = st.columns([2, 2, 3])
+                with col_nome:
+                    st.write(r['nome'])
+                with col_telefone:
+                    st.write(f"`{r['telefone']}`")
+                with col_erro:
+                    st.write(f"{r['mensagem']}")
 
 def main():
     # Sidebar
@@ -359,7 +382,7 @@ def main():
                                 st.metric("Com Celular", com_cel)
                             
                             # Preview
-                            st.dataframe(df_resultado.head(5), use_container_width=True)
+                            st.dataframe(df_resultado.head(5), width='stretch')
                             
                             # Downloads
                             excel_data = gerar_excel(df_resultado, f"{nome}.xlsx")
