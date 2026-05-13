@@ -227,7 +227,7 @@ cp .env.example .env
 
 **Passo 2: Configure seus valores**
 ```ini
-WHATSAPP_API_URL=https://seu-servidor.azurewebsites.net
+WHATSAPP_API_URL=
 WHATSAPP_AUTH_TOKEN=seu_token_aqui
 
 WHATSAPP_TEMPLATE_COBRANCA=550e8400-...
@@ -295,7 +295,7 @@ Quando expande "📤 Disparar no WhatsApp":
 
 **Exemplo 1: Uma única template**
 ```env
-WHATSAPP_TEMPLATE_COBRANCA=550e8400-e29b-41d4-a716-446655440000
+WHATSAPP_TEMPLATE_COBRANCA=
 ```
 
 **Exemplo 2: Múltiplas templates (recomendado)**
@@ -397,11 +397,6 @@ Incluídos (processados normalmente):
 - `Valor Cobrança` - Para incluir na mensagem
 - `Status da Fatura` - Para filtrar automáticamente
 
-## 📚 Documentação Adicional
-
-- [GUIA_TESTE_LOCAL.py](GUIA_TESTE_LOCAL.py) - Passo-a-passo completo
-- [EXEMPLO_MULTIPLAS_TEMPLATES.md](EXEMPLO_MULTIPLAS_TEMPLATES.md) - Exemplos de código
-- [exemplo_multiplas_templates.py](exemplo_multiplas_templates.py) - 4 exemplos executáveis
 
 ## 🐛 Reportar Problemas
 
@@ -449,31 +444,7 @@ templates = [
 resultados = client.send_batch(templates)
 ```
 
-### 📚 Documentação Completa
 
-Para configuração detalhada, consulte [WHATSAPP_GUIA_TEMPLATES.md](WHATSAPP_GUIA_TEMPLATES.md)
-
-Tópicos cobertos:
-- Como encontrar seu Template ID (GUID)
-- Estrutura completa do payload
-- Redirecionamento de fluxos e departamentos
-- Ações por botão
-- Troubleshooting
-- Boas práticas de segurança
-
-## Estrutura
-
-```
-regua_de_cobranca/
-├── app.py                                  # Aplicação principal (Streamlit)
-├── whatsapp_integration.py                 # Módulo de integração WhatsApp
-├── whatsapp_sender.py                      # Interface de envio (Streamlit)
-├── exemplo_uso_whatsapp.py                 # Exemplos de código
-├── requirements.txt                        # Dependências do projeto
-├── .env.example                            # Configurações de exemplo
-├── WHATSAPP_INTEGRATION_GUIDE.md           # Guia completo de integração
-└── README.md                               # Documentação (este arquivo)
-```
 
 ### Arquivos principais
 
@@ -482,23 +453,6 @@ regua_de_cobranca/
   - Funções de cálculo de vencimento
   - Funções de filtro por vencimento e status
   - Interface para gerar planilhas
-
-- **whatsapp_integration.py** - Módulo WhatsApp:
-  - Classe `WhatsAppClient` para comunicação com API
-  - Funções de validação e formatação de telefones
-  - Função `create_cobranca_message()` para gerar mensagens
-
-- **whatsapp_sender.py** - Interface de envio:
-  - Página Streamlit dedicada ao envio
-  - Visualização de mensagens antes do envio
-  - Relatório detalhado de resultados
-  - Histórico e configurações
-
-- **exemplo_uso_whatsapp.py** - Exemplos práticos:
-  - 5 exemplos de utilização
-  - Teste de conexão
-  - Envio simples e em lote
-  - Carregamento de planilhas
 
 ## Melhorias futuras
 
