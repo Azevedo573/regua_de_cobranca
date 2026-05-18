@@ -7,6 +7,18 @@ import pandas as pd
 from datetime import datetime, timedelta
 import io
 from openpyxl.styles import numbers
+import os
+from dotenv import load_dotenv
+import time
+
+# Carrega variáveis de ambiente
+load_dotenv()
+
+# Importa integração WhatsApp
+try:
+    from whatsapp_simples import WhatsAppClientSimples
+except ImportError:
+    st.warning("⚠️ whatsapp_simples.py não encontrado. Funcionalidade WhatsApp desabilitada.")
 
 # Configuração da página
 st.set_page_config(
@@ -38,23 +50,7 @@ def calcular_dias_vencimento(row):
     
     return (hoje - data_venc).days
 
-def filtrar_por_vencimento(df, dias, operador):
-    """Filtra contratos baseado nos dias de vencimento"""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    
-    df = df.copy()
-    df['Dias_Vencimento'] = df.apply(calcular_dias_vencimento, axis=1)
-    df = df.dropna(subset=['Dias_Vencimento'])
-    
-    if operador == 'igual':
-        return df[df['Dias_Vencimento'] == dias]
-    elif operador == 'maior_igual':
-        return df[df['Dias_Vencimento'] >= dias]
-    elif operador == 'menor_igual':
-        return df[df['Dias_Vencimento'] <= dias]
-    elif operador == 'entre':
-        return df
+
 
 def gerar_excel(df, nome_arquivo):
     """Gera arquivo Excel em memória para download"""
@@ -97,51 +93,307 @@ def gerar_excel_resumido(df):
     output.seek(0)
     return output
 
+# ============================================================================
+# FUNÇÕES PARA INTEGRAÇÃO WHATSAPP SIMPLES
+# ============================================================================
+
+def inicializar_whatsapp_simples():
+    """Inicializa cliente WhatsApp simples"""
+    try:
+        api_url = os.getenv('WHATSAPP_API_URL')
+        auth_token = os.getenv('WHATSAPP_AUTH_TOKEN')
+        template_id = os.getenv('WHATSAPP_TEMPLATE_COBRANCA')
+        # template_id_1 = os.getenv('WHATSAPP_TEMPLATE_1')
+
+        
+        if not api_url or not auth_token or not template_id:
+            return None, None
+        
+        client = WhatsAppClientSimples(
+            api_url=api_url,
+            auth_token=auth_token
+        )
+        
+        return client, template_id
+    except Exception as e:
+        st.error(f"❌ Erro ao inicializar WhatsApp: {str(e)}")
+        return None, None
+
+def enviar_whatsapp_simples(df, client, template_id, periodo, simular=False):
+    """
+    Envia mensagens WhatsApp para todos os números da lista com template automático por período.
+    
+    Espera coluna 'Celular' com os telefones
+    
+    Args:
+        df: DataFrame com os dados
+        client: Cliente WhatsApp
+        template_id: ID da template (ignorado, usa automático baseado no período)
+        periodo: Nome do período (ex: "1-3 dias de atraso")
+        simular: Se True, não envia de verdade
+    """
+    
+    if df is None or df.empty:
+        st.error("❌ Nenhum registro para enviar")
+        return None
+    
+    # Verifica coluna de telefone
+    if 'Celular' not in df.columns:
+        st.error("❌ Planilha não possui coluna 'Celular'")
+        return None
+    
+    # Prepara lista de contatos
+    contatos = []
+    
+    for idx, row in df.iterrows():
+        telefone = str(row.get('Celular', '')).strip()
+        
+        # Pula se não tem telefone
+        if not telefone or telefone == 'nan' or telefone == '':
+            continue
+        
+        nome = str(row.get('Nome Titular', 'Cliente')).strip()
+        
+        contatos.append({
+            'nome': nome,
+            'telefone': telefone,
+            'valor': str(row.get('Valor Cobrança', '0')).strip(),
+            'vencimento': str(row.get('Data de Vencimento', '')).strip(),
+            'operadora': str(row.get('Operadora da Fatura', '')).strip(),
+        })
+    
+    if not contatos:
+        st.error("❌ Nenhum contato com telefone encontrado")
+        return None
+    
+    st.info(f"📤 Preparados {len(contatos)} contatos para envio")
+    
+    # Define função para extrair parâmetros baseado no período
+    def extrair_parametros(contato):
+        """
+        Extrai parâmetros diferentes baseado no tipo de template do período.
+        Cada template pode ter um número diferente de parâmetros.
+        """
+        tipo_template = client.obter_tipo_periodo(periodo)
+        
+        # Template ANTECIPADO: Nome, Operadora
+        if tipo_template == "antecipado":
+            return [
+                contato['nome'],          # {{0}} - Nome
+                contato['operadora']      # {{1}} - Operadora
+            ]
+        
+        # Template A_VENCER: Nome, Operadora
+        elif tipo_template == "a_vencer":
+            return [
+                contato['nome'],          # {{0}} - Nome
+                contato['operadora']      # {{1}} - Operadora
+            ]
+        
+        # Template ATRASO_LEVE: Nome, Operadora, Data
+        elif tipo_template == "atraso_leve":
+            return [
+                contato['nome'],          # {{0}} - Nome
+                contato['operadora'],     # {{1}} - Operadora
+                contato['vencimento']     # {{2}} - Data de Vencimento
+            ]
+        
+        # Template ATRASO_MODERADO: Nome, Operadora, Valor
+        elif tipo_template == "atraso_moderado":
+            return [
+                contato['nome'],          # {{0}} - Nome
+                contato['operadora'],     # {{1}} - Operadora
+                contato['valor']          # {{2}} - Valor
+            ]
+        
+        # Template ATRASO_SEVERO: Nome, Operadora, Valor
+        elif tipo_template == "atraso_severo":
+            return [
+                contato['nome'],          # {{0}} - Nome
+                contato['operadora'],     # {{1}} - Operadora
+                contato['valor']          # {{2}} - Valor
+            ]
+        
+        # DEFAULT: Nome, Operadora (mais seguro)
+        else:
+            return [
+                contato['nome'],
+                contato['operadora']
+            ]
+    
+    # Envia lote com template AUTOMÁTICO baseado no período
+    with st.spinner("📤 Enviando mensagens..."):
+        resultado = client.enviar_lote_por_periodo(
+            contatos=contatos,
+            periodo=periodo,                          # Template automático!
+            funcao_parametros=extrair_parametros,
+            simular=simular,
+            intervalo=1.5
+        )
+    
+    return resultado
+
+def exibir_resultado_whatsapp_simples(resultado):
+    """Exibe resultado do envio WhatsApp com detalhes de WAMID e período"""
+    if resultado is None:
+        return
+    
+    # Exibe período e template (se disponível)
+    if 'periodo' in resultado and 'tipo_template' in resultado:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"📄 **Período:** {resultado['periodo']}")
+        with col2:
+            st.info(f"📱 **Template:** {resultado['tipo_template'].upper().replace('_', ' ')}")
+        st.markdown("")
+    
+    # Exibe estatísticas
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("📊 Total", resultado['total'])
+    with col2:
+        st.metric("✅ Sucesso", resultado['sucesso'])
+    with col3:
+        st.metric("❌ Erro", resultado['erro'])
+    with col4:
+        st.metric("📈 Taxa", resultado['taxa_sucesso'])
+    
+    st.markdown("---")
+    
+    # Mostra detalhes de cada envio
+    st.subheader("📋 Detalhes do Envio")
+    
+    # Sucesso
+    sucessos = [r for r in resultado['resultados'] if r['sucesso']]
+    if sucessos:
+        with st.expander(f"✅ Enviadas ({len(sucessos)})", expanded=True):
+            for r in sucessos:
+                col_nome, col_telefone, col_wamid = st.columns([2, 2, 3])
+                with col_nome:
+                    st.write(r['nome'])
+                with col_telefone:
+                    st.write(f"`{r['telefone']}`")
+                with col_wamid:
+                    if r['wamid'] and r['wamid'] != 'simulado':
+                        st.write(f"🔗 `{r['wamid'][:30]}...`")
+                    else:
+                        st.write("(Simulado)")
+    
+    # Falhas
+    falhas = [r for r in resultado['resultados'] if not r['sucesso']]
+    if falhas:
+        with st.expander(f"❌ Falhadas ({len(falhas)})"):
+            for r in falhas:
+                col_nome, col_telefone, col_erro = st.columns([2, 2, 3])
+                with col_nome:
+                    st.write(r['nome'])
+                with col_telefone:
+                    st.write(f"`{r['telefone']}`")
+                with col_erro:
+                    st.write(f"{r['mensagem']}")
+
 def main():
-    # Sidebar com instruções
+    # Inicializa session_state para armazenar resultados
+    if "resultados" not in st.session_state:
+        st.session_state.resultados = None
+    if "df_original" not in st.session_state:
+        st.session_state.df_original = None
+    if "ultimo_arquivo" not in st.session_state:
+        st.session_state.ultimo_arquivo = None
+    
+    # Sidebar
     st.sidebar.header("📋 Instruções")
     st.sidebar.markdown("""
-    1. Faça upload da planilha de faturamento (Excel .xlsx)
-    2. O sistema processará automaticamente
-    3. Baixe as planilhas filtradas abaixo
+    1. Faça upload da planilha de faturamento
+    2. Sistema filtra automaticamente
+    3. Baixe as planilhas filtradas
+    4. Clique em "📤 Disparar WhatsApp" para enviar
     """)
     
     st.sidebar.markdown("---")
-    st.sidebar.header("📁 Formato Aceito")
-    st.sidebar.markdown("• Arquivo Excel (.xlsx)")
-    st.sidebar.markdown("• Primeira linha = headers")
+    st.sidebar.header("📁 Colunas Esperadas")
+    st.sidebar.markdown("""
+    **Obrigatórias:**
+    - Data de Vencimento
+    - Celular
+    - Nome Titular
     
-    # Upload do arquivo
+    **Opcionais:**
+    - Valor Cobrança
+    - Status da Fatura
+    """)
+    
+    # Inicializa WhatsApp
+    st.sidebar.markdown("---")
+    st.sidebar.header("📱 WhatsApp")
+    
+    client, template_id = inicializar_whatsapp_simples()
+    
+    if client:
+        ok, msg = client.testar_conexao()
+        if ok:
+            st.sidebar.success("✅ API conectada")
+        else:
+            st.sidebar.error(f"❌ {msg}")
+    else:
+        st.sidebar.warning("⚠️ Configure .env")
+    
+    # Modo teste
+    modo_simulacao = st.sidebar.checkbox(
+        "🧪 Modo Simulação",
+        value=False,
+        help="Simula sem enviar de verdade"
+    )
+    
+    # Upload
     uploaded_file = st.file_uploader(
-        "📤 Arraste ou selecione a planilha de faturamento",
-        type=['xlsx', 'xls'],
-        help="Aceita arquivos Excel (.xlsx ou .xls)"
+        "📤 Arraste ou selecione a planilha",
+        type=['xlsx', 'xls']
     )
     
     if uploaded_file is not None:
         try:
-            with st.status("⏳ Processando planilha...", expanded=True) as status:
-                # Carrega a planilha
-                st.write("📥 Carregando arquivo...")
-                df = pd.read_excel(uploaded_file)
-                st.write(f"✅ Planilha carregada com {len(df)} registros")
+            # Verifica se arquivo mudou ou se precisa processar
+            arquivo_mudou = (st.session_state.ultimo_arquivo != uploaded_file.name)
+            
+            if arquivo_mudou or st.session_state.resultados is None:
+                # Cria placeholders para feedback
+                status_placeholder = st.empty()
+                progress_bar = st.progress(0)
                 
-                # Mostra preview
-                with st.expander("👀 Visualizar dados carregados"):
+                # Carrega arquivo
+                status_placeholder.info("📥 Carregando arquivo...")
+                df = pd.read_excel(uploaded_file)
+                st.session_state.df_original = df
+                st.session_state.ultimo_arquivo = uploaded_file.name
+                progress_bar.progress(10)
+                
+                # Verifica coluna obrigatória
+                if 'Data de Vencimento' not in df.columns:
+                    status_placeholder.error("❌ Coluna 'Data de Vencimento' não encontrada!")
+                    progress_bar.empty()
+                    status_placeholder.empty()
+                    return
+                
+                st.success(f"✅ {len(df)} registros carregados")
+                progress_bar.progress(15)
+                
+                # Preview
+                with st.expander("👀 Visualizar dados"):
                     st.dataframe(df.head(10))
-                    st.info(f"Total de linhas: {len(df)}")
                 
                 st.markdown("---")
-                st.header("📑 Planilhas Geradas")
+                st.header("📑 Planilhas por Período")
                 
-                # Define os filtros por INTERVALOS de atraso e cobrança antecipada
-                st.write("⚙️ Aplicando filtros...")
+                # Filtra dados
+                status_placeholder.info("⚙️ Filtrando dados...")
+                progress_bar.progress(20)
+                
                 filtros = [
-                    # Régua de cobrança antecipada (faturas emitidas)
-                    {"nome": "Cobrança Antecipada - 10 dias antes", "dias_min": -10, "dias_max": -10, "status_filter": ["Emitida"]},
-                    {"nome": "Cobrança Antecipada - 5 dias antes", "dias_min": -5, "dias_max": -5, "status_filter": ["Emitida"]},
-                    {"nome": "Cobrança Antecipada - 3 dias antes", "dias_min": -3, "dias_max": -3, "status_filter": ["Emitida"]},
-                    # Atrasos
+                    {"nome": "Cobrança Antecipada - 10 dias", "dias_min": -10, "dias_max": -10},
+                    {"nome": "Cobrança Antecipada - 5 dias", "dias_min": -5, "dias_max": -5},
+                    {"nome": "Cobrança Antecipada - 3 dias", "dias_min": -3, "dias_max": -3},
                     {"nome": "A vencer (Até hoje)", "dias_min": None, "dias_max": 0},
                     {"nome": "A vencer (hoje)", "dias_min": 0, "dias_max": 0},
                     {"nome": "1-3 dias de atraso", "dias_min": 1, "dias_max": 3},
@@ -153,39 +405,23 @@ def main():
                     {"nome": "> 90 dias de atraso", "dias_min": 91, "dias_max": None},
                 ]
                 
-                # Colunas importantes para verificar
-                colunas_importantes = ['Data de Vencimento', 'Status da Fatura']
-                colunas_encontradas = [col for col in colunas_importantes if col in df.columns]
-                
-                if 'Data de Vencimento' not in colunas_encontradas:
-                    st.error("❌ Coluna 'Data de Vencimento' não encontrada na planilha!")
-                    return
-                
-                # Processa cada filtro por INTERVALO
+                # Processa cada filtro
                 resultados = {}
                 
-                for filtro in filtros:
+                for idx, filtro in enumerate(filtros):
                     df_filtro = df.copy()
                     df_filtro['Dias_Vencimento'] = df_filtro.apply(calcular_dias_vencimento, axis=1)
                     df_filtro = df_filtro.dropna(subset=['Dias_Vencimento'])
                     
-                    # Filtra por status específico se definido (para cobrança antecipada)
-                    if 'status_filter' in filtro and filtro['status_filter']:
-                        if 'Status da Fatura' in df_filtro.columns:
-                            df_filtro = df_filtro[df_filtro['Status da Fatura'].isin(filtro['status_filter'])]
-                    
-                    # Aplica filtro por INTERVALO de dias
+                    # Aplica filtro
                     dias_min = filtro['dias_min']
                     dias_max = filtro['dias_max']
                     
                     if dias_min is None and dias_max is not None:
-                        # A vencer (até hoje): dias <= 0
                         df_resultado = df_filtro[df_filtro['Dias_Vencimento'] <= dias_max]
                     elif dias_min is not None and dias_max is None:
-                        # Maior que X dias: dias >= X
                         df_resultado = df_filtro[df_filtro['Dias_Vencimento'] >= dias_min]
                     elif dias_min is not None and dias_max is not None:
-                        # Intervalo entre X e Y dias
                         df_resultado = df_filtro[
                             (df_filtro['Dias_Vencimento'] >= dias_min) & 
                             (df_filtro['Dias_Vencimento'] <= dias_max)
@@ -193,52 +429,68 @@ def main():
                     else:
                         df_resultado = pd.DataFrame()
                     
-                    # Filtra por status não pago (se coluna existir e não for cobrança antecipada)
-                    if 'status_filter' not in filtro or not filtro['status_filter']:
-                        if 'Status da Fatura' in df.columns:
-                            # Lista de status que devem ser EXCLUÍDOS (já pagos)
-                            status_pagos = [
-                                'Pago', 'PAGO', 'pago',
-                                'Paga', 'PAGA', 'paga',
-                                'Pago no Pix', 'PAGO NO PIX', 'pago no pix',
-                                'Paga no Pix', 'PAGA NO PIX', 'paga no pix','Paga no PIX',
-                                'Quitado', 'QUITADO', 'quitado',
-                                'Liquidado', 'LIQUIDADO', 'liquidado'
-                            ]
-                            df_resultado = df_resultado[
-                                (~df_resultado['Status da Fatura'].isin(status_pagos)) &
-                                (df_resultado['Status da Fatura'].notna())
-                            ]
-
-                            # Filtra por status cancelada (se coluna existir)
-                            status_canceladas = [
-                                'Cancelada', 'CANCELADA', 'cancelada',
-                                'Anulada', 'ANULADA', 'anulada'
-                            ]
-                            df_resultado = df_resultado[
-                                (~df_resultado['Status da Fatura'].isin(status_canceladas)) &
-                                (df_resultado['Status da Fatura'].notna())
-                            ]
-
-                            # Filtra por status Baixada (se coluna existir)
-                            status_baixadas = [
-                                'Baixada', 'BAIXADA', 'baixada',
-                                'Liquidada', 'LIQUIDADA', 'liquidada'
-                            ]
-                            df_resultado = df_resultado[
-                                (~df_resultado['Status da Fatura'].isin(status_baixadas)) &
-                                (df_resultado['Status da Fatura'].notna())
-                            ]
-                       
-                    # Remove coluna calculada auxiliar
+                    # Filtra status pagos
+                    if 'Status da Fatura' in df.columns:
+                        status_pagos = ['Pago', 'PAGO', 'pago', 'Paga', 'PAGA', 'paga']
+                        status_canceladas = ['Cancelada', 'CANCELADA', 'cancelada']
+                        status_baixadas = ['Baixada', 'BAIXADA', 'baixada']
+                        
+                        df_resultado = df_resultado[
+                            (~df_resultado['Status da Fatura'].isin(status_pagos)) &
+                            (~df_resultado['Status da Fatura'].isin(status_canceladas)) &
+                            (~df_resultado['Status da Fatura'].isin(status_baixadas)) &
+                            (df_resultado['Status da Fatura'].notna())
+                        ]
+                    
+                    # Remove coluna auxiliar
                     if 'Dias_Vencimento' in df_resultado.columns:
                         df_resultado = df_resultado.drop(columns=['Dias_Vencimento'])
                     
                     resultados[filtro['nome']] = df_resultado
+                    
+                    # Atualiza progress bar
+                    progresso = int(20 + (idx / len(filtros)) * 70)
+                    progress_bar.progress(progresso)
                 
-                st.write("📊 Gerando relatórios...")
+                # Salva resultados em session_state
+                st.session_state.resultados = resultados
                 
-                # Exibe cada resultado
+                status_placeholder.success("✅ Processamento concluído!")
+                progress_bar.progress(100)
+                
+                # Limpa placeholders após 1 segundo
+                time.sleep(1)
+                status_placeholder.empty()
+                progress_bar.empty()
+            
+            # =========================================================================
+            # EXIBE RESULTADOS (reutiliza dados do session_state)
+            # =========================================================================
+            
+            if st.session_state.resultados is not None:
+                st.markdown("---")
+                st.header("📊 Resultados Processados")
+                
+                # Exibe informações sobre templates
+                if client:
+                    with st.expander("📱 ℹ️ Templates de WhatsApp Disponíveis"):
+                        col1, col2 = st.columns(2)
+                        
+                        templates = client.listar_templates()
+                        for i, (tipo, config) in enumerate(templates.items()):
+                            if i % 2 == 0:
+                                col = col1
+                            else:
+                                col = col2
+                            
+                            with col:
+                                st.markdown(f"**{tipo.upper().replace('_', ' ')}**")
+                                st.caption(f"Template ID: `{config['id']}`")
+                                st.caption(f"🔘 Botões: {', '.join(config['botoes'])}")
+                
+                st.markdown("")  # Espaço
+                
+                resultados = st.session_state.resultados
                 total_geral = 0
                 
                 for nome, df_resultado in resultados.items():
@@ -249,63 +501,90 @@ def main():
                             with col1:
                                 st.metric("Registros", len(df_resultado))
                             with col2:
-                                valor_total = df_resultado['Valor Cobrança'].sum() if 'Valor Cobrança' in df_resultado.columns else 0
-                                st.metric("Valor Total", f"R$ {valor_total:,.2f}")
+                                if 'Valor Cobrança' in df_resultado.columns:
+                                    valor = df_resultado['Valor Cobrança'].sum()
+                                    st.metric("Valor Total", f"R$ {valor:,.2f}")
+                                else:
+                                    st.metric("Valor Total", "N/A")
                             with col3:
-                                com_telefone = df_resultado['Telefone'].notna().sum() if 'Telefone' in df_resultado.columns else 0
-                                st.metric("Com Telefone", com_telefone)
-
+                                com_cel = (df_resultado['Celular'].notna()).sum() if 'Celular' in df_resultado.columns else 0
+                                st.metric("Com Celular", com_cel)
+                            
                             # Preview
-                            st.dataframe(df_resultado.head(5), use_container_width=True)
-
-                            # Download planilha completa
+                            st.dataframe(df_resultado.head(5), width='stretch')
+                            
+                            # Downloads
                             excel_data = gerar_excel(df_resultado, f"{nome}.xlsx")
                             st.download_button(
                                 label=f"⬇️ Baixar {nome}",
                                 data=excel_data,
                                 file_name=f"{nome.replace(' ', '_')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"download_{nome}"
                             )
-
-                            # Download planilha resumida
+                            
                             excel_resumido = gerar_excel_resumido(df_resultado)
                             st.download_button(
                                 label=f"⬇️ Baixar {nome} (Resumido)",
                                 data=excel_resumido,
                                 file_name=f"{nome.replace(' ', '_')}_resumido.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"download_resumido_{nome}"
                             )
-
+                            
+                            # Botão WhatsApp
+                            if client and template_id and len(df_resultado) > 0:
+                                st.markdown("---")
+                                
+                                # Exibe tipo de template que será usado
+                                tipo_template = client.obter_tipo_periodo(nome)
+                                config_template = client.obter_template_por_periodo(nome)
+                                botoes = list(config_template['response_action']['buttonActions'].keys())
+                                
+                                col_info1, col_info2 = st.columns(2)
+                                with col_info1:
+                                    st.info(f"📱 **Tipo de Template:** {tipo_template.upper().replace('_', ' ')}")
+                                with col_info2:
+                                    st.info(f"🔘 **Botões:** {', '.join(botoes)}")
+                                
+                                st.markdown("")
+                                
+                                if st.button(
+                                    f"📤 Disparar {len(df_resultado)} no WhatsApp",
+                                    key=f"btn_whatsapp_{nome}",
+                                    type="primary"
+                                ):
+                                    # Preview antes de enviar
+                                    with st.expander("👀 Ver contatos que serão enviados"):
+                                        df_preview = df_resultado[['Celular', 'Nome Titular']].head(10)
+                                        st.dataframe(df_preview)
+                                    
+                                    # Envia com template automático do período
+                                    resultado = enviar_whatsapp_simples(
+                                        df_resultado,
+                                        client,
+                                        template_id,
+                                        periodo=nome,                  # Nome do período!
+                                        simular=modo_simulacao
+                                    )
+                                    
+                                    if resultado:
+                                        exibir_resultado_whatsapp_simples(resultado)
+                            
                             total_geral += len(df_resultado)
                         else:
                             st.info("Nenhum registro encontrado")
                 
                 st.markdown("---")
-                st.write(f"✅ Total de registros filtrados: **{total_geral}**")
-                status.update(label="✅ Processamento concluído!", state="complete")
-            
-        except Exception as e:
-            st.error(f"❌ Erro ao processar planilha: {str(e)}")
-            st.info("Verifique se o formato da planilha está correto")
-     
-    else:
-        # Instruções quando não há arquivo
-        st.info("👆 Faça upload de uma planilha Excel para começar")
+                st.write(f"✅ Total filtrado: **{total_geral}**")
         
-        st.markdown("### Colunas esperadas:")
+        except Exception as e:
+            st.error(f"❌ Erro: {str(e)}")
+            st.info("Verifique o formato da planilha")
+    
+    else:
+        st.info("👆 Faça upload de uma planilha Excel para começar")
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("""
-            **Obrigatórias:**
-            - Data de Vencimento
-            """)
-        with col2:
-            st.markdown("""
-            **Importantes para WhatsApp:**
-            - Nome Titular
-            - Telefone
-            - Celular
-            """)
         with col3:
             st.markdown("""
             **Opcionais:**
