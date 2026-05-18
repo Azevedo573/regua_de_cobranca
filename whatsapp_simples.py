@@ -27,6 +27,7 @@ class WhatsAppClientSimples:
         sucesso = client.enviar_mensagem(
             nome="João",
             telefone="21981088659",
+            template_id="1450739389691884",
             parametros=["João", "150,00", "15/05"]
         )
     """
